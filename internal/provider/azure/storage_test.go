@@ -18,6 +18,7 @@ import (
 	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/core/instance"
+	"github.com/juju/juju/environs"
 	"github.com/juju/juju/environs/context"
 	"github.com/juju/juju/internal/provider/azure"
 	"github.com/juju/juju/internal/provider/azure/internal/azuretesting"
@@ -28,9 +29,10 @@ import (
 type storageSuite struct {
 	testing.BaseSuite
 
-	provider storage.Provider
-	requests []*http.Request
-	sender   azuretesting.Senders
+	provider    storage.Provider
+	envProvider environs.EnvironProvider
+	requests    []*http.Request
+	sender      azuretesting.Senders
 
 	cloudCallCtx      *context.CloudCallContext
 	invalidCredential bool
@@ -49,6 +51,7 @@ func (s *storageSuite) SetUpTest(c *gc.C) {
 		},
 	})
 	s.sender = nil
+	s.envProvider = envProvider
 
 	var err error
 	env := openEnviron(c, envProvider, &s.sender)
@@ -202,6 +205,86 @@ func (s *storageSuite) TestCreateVolumes(c *gc.C) {
 	assertRequestBody(c, s.requests[0], makeDisk("volume-0", 1))
 	assertRequestBody(c, s.requests[1], makeDisk("volume-1", 2))
 	assertRequestBody(c, s.requests[2], makeDisk("volume-2", 1))
+}
+
+func (s *storageSuite) TestCreateVolumesAvailabilityZone(c *gc.C) {
+	env := openEnviron(c, s.envProvider, &s.sender, testing.Attrs{
+		"use-availability-zones": true,
+	})
+	provider, err := env.StorageProvider("azure")
+	c.Assert(err, jc.ErrorIsNil)
+	storageConfig, err := storage.NewConfig("azure", "azure", nil)
+	c.Assert(err, jc.ErrorIsNil)
+	volumeSource, err := provider.VolumeSource(storageConfig)
+	c.Assert(err, jc.ErrorIsNil)
+
+	makeVolumeParams := func(volume, instanceId string) storage.VolumeParams {
+		return storage.VolumeParams{
+			Tag:      names.NewVolumeTag(volume),
+			Size:     1024,
+			Provider: "azure",
+			Attachment: &storage.VolumeAttachmentParams{
+				AttachmentParams: storage.AttachmentParams{
+					Provider:   "azure",
+					Machine:    names.NewMachineTag(volume),
+					InstanceId: instance.Id(instanceId),
+				},
+				Volume: names.NewVolumeTag(volume),
+			},
+		}
+	}
+	params := []storage.VolumeParams{
+		// Attached to a zonal virtual machine.
+		makeVolumeParams("0", "machine-0"),
+		// Attached to a regional virtual machine.
+		makeVolumeParams("1", "machine-1"),
+	}
+
+	vmSender := func(name string, zones ...string) *azuretesting.MockSender {
+		vm := &armcompute.VirtualMachine{Name: to.Ptr(name)}
+		if len(zones) > 0 {
+			vm.Zones = to.SliceOfPtrs(zones...)
+		}
+		sender := azuretesting.NewSenderWithValue(vm)
+		sender.PathPattern = `.*/virtualMachines/` + name
+		return sender
+	}
+	diskSender := func(name string) *azuretesting.MockSender {
+		sender := azuretesting.NewSenderWithValue(&armcompute.Disk{
+			Name: to.Ptr(name),
+			Properties: &armcompute.DiskProperties{
+				DiskSizeGB: to.Ptr(int32(1)),
+			},
+		})
+		sender.PathPattern = `.*/Microsoft\.Compute/disks/` + name
+		return sender
+	}
+	s.requests = nil
+	s.sender = azuretesting.Senders{
+		vmSender("machine-0", "2"),
+		diskSender("volume-0"),
+		vmSender("machine-1"),
+		diskSender("volume-1"),
+	}
+
+	results, err := volumeSource.CreateVolumes(s.cloudCallCtx, params)
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(results, gc.HasLen, len(params))
+	c.Check(results[0].Error, jc.ErrorIsNil)
+	c.Check(results[1].Error, jc.ErrorIsNil)
+
+	c.Assert(s.requests, gc.HasLen, 4)
+	c.Check(s.requests[0].Method, gc.Equals, "GET") // get machine-0
+	c.Check(s.requests[1].Method, gc.Equals, "PUT") // create volume-0
+	c.Check(s.requests[2].Method, gc.Equals, "GET") // get machine-1
+	c.Check(s.requests[3].Method, gc.Equals, "PUT") // create volume-1
+
+	var disk armcompute.Disk
+	unmarshalRequestBody(c, s.requests[1], &disk)
+	c.Check(disk.Zones, jc.DeepEquals, to.SliceOfPtrs("2"))
+	disk = armcompute.Disk{}
+	unmarshalRequestBody(c, s.requests[3], &disk)
+	c.Check(disk.Zones, gc.HasLen, 0)
 }
 
 func (s *storageSuite) createSenderWithUnauthorisedStatusCode() {

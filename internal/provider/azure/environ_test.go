@@ -1138,6 +1138,10 @@ type assertStartInstanceRequestsParams struct {
 	hasSpaceConstraints    bool
 	managedIdentity        string
 	storageAccountType     *armcompute.StorageAccountType
+	availabilityZone       string
+	// bootstrap is true if the controller is being bootstrapped
+	// without an availability set.
+	bootstrap bool
 }
 
 func (s *environSuite) assertStartInstanceRequests(
@@ -1228,7 +1232,7 @@ func (s *environSuite) assertStartInstanceRequests(
 
 	bootstrapping := false
 	subnetName := "juju-internal-subnet"
-	if args.availabilitySetName == "juju-controller" {
+	if args.availabilitySetName == "juju-controller" || args.bootstrap {
 		subnetName = "juju-controller-subnet"
 		bootstrapping = true
 	}
@@ -1401,6 +1405,10 @@ func (s *environSuite) assertStartInstanceRequests(
 		}
 	}
 
+	var zones []string
+	if args.availabilityZone != "" {
+		zones = []string{args.availabilityZone}
+	}
 	if args.publicIP {
 		templateResources = append(templateResources, armtemplates.Resource{
 			APIVersion: azure.NetworkAPIVersion,
@@ -1412,7 +1420,8 @@ func (s *environSuite) assertStartInstanceRequests(
 				PublicIPAllocationMethod: to.Ptr(armnetwork.IPAllocationMethodStatic),
 				PublicIPAddressVersion:   to.Ptr(armnetwork.IPVersionIPv4),
 			},
-			Sku: &armtemplates.Sku{Name: "Standard"},
+			Sku:   &armtemplates.Sku{Name: "Standard"},
+			Zones: zones,
 		})
 	}
 	templateResources = append(templateResources, nicResources...)
@@ -1437,6 +1446,7 @@ func (s *environSuite) assertStartInstanceRequests(
 			AvailabilitySet: availabilitySetSubResource,
 		},
 		DependsOn: vmDependsOn,
+		Zones:     zones,
 	}
 	if args.managedIdentity != "" {
 		vmTemplate.Identity = &armcompute.VirtualMachineIdentity{

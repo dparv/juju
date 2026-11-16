@@ -195,6 +195,14 @@ func (v *azureVolumeSource) createManagedDiskVolume(ctx context.ProviderCallCont
 		},
 	}
 
+	// A disk can only be attached to a zonal virtual machine
+	// if it is in the same availability zone.
+	zones, err := v.attachmentZones(ctx, p.Attachment)
+	if err != nil {
+		return nil, errors.Annotatef(err, "creating disk for volume %q", p.Tag.Id())
+	}
+	diskModel.Zones = zones
+
 	disks, err := v.env.disksClient()
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -218,6 +226,35 @@ func (v *azureVolumeSource) createManagedDiskVolume(ctx context.ProviderCallCont
 		},
 	}
 	return &volume, nil
+}
+
+// attachmentZones returns the availability zones of the virtual machine
+// that a volume will be attached to. Nil is returned if the model is not
+// configured to use availability zones, or there is no attachment, or the
+// virtual machine is not zonal.
+func (v *azureVolumeSource) attachmentZones(
+	ctx context.ProviderCallContext, attachment *storage.VolumeAttachmentParams,
+) ([]*string, error) {
+	if attachment == nil || attachment.InstanceId == "" {
+		return nil, nil
+	}
+	if !v.env.useAvailabilityZones() {
+		return nil, nil
+	}
+	compute, err := v.env.computeClient()
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	vmName := string(attachment.InstanceId)
+	vm, err := compute.Get(ctx, v.env.resourceGroup, vmName, nil)
+	if errorutils.IsNotFoundError(err) {
+		return nil, nil
+	} else if err != nil {
+		return nil, errorutils.HandleCredentialError(
+			errors.Annotatef(err, "getting virtual machine %q", vmName), ctx,
+		)
+	}
+	return vm.Zones, nil
 }
 
 // ListVolumes is specified on the storage.VolumeSource interface.

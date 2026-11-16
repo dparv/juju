@@ -188,6 +188,11 @@ Microsoft Azure supports the following {ref}`cloud-specific model configuration 
 (azure-model-network)=
 - **`network`**: If set, use the specified virtual network for all model machines instead of creating one. Type: `string`. Default: none. Immutable.
 
+**Compute**
+
+(azure-model-use-availability-zones)=
+- **`use-availability-zones`**: If true, place machines into [Azure availability zones](https://learn.microsoft.com/en-us/azure/reliability/availability-zones-overview) instead of availability sets. Requires `load-balancer-sku-name` to be `Standard`. Changing the value only affects machines provisioned afterwards. Type: `bool`. Default: `false`.
+
 (azure-machine)=
 ## Machines
 
@@ -216,9 +221,12 @@ The constraints `instance-type` and `[arch, cores, mem]` are mutually exclusive.
 **Networking**
 
 - {ref}`constraint-allocate-public-ip`
+- {ref}`constraint-zones`. Requires the {ref}`use-availability-zones <azure-model-use-availability-zones>` model configuration key to be `true`.
 
 ```{note}
-The `zones` constraint is not supported on Azure. Instead, Juju uses [Azure availability sets](https://learn.microsoft.com/en-us/azure/virtual-machines/availability-set-overview): for each application, an availability set is created and all units of that application are placed within it. This protects against hardware and infrastructure failures within a region, but does not map to Juju's zone abstraction — charms cannot query which zone they are in.
+By default, Juju uses [Azure availability sets](https://learn.microsoft.com/en-us/azure/virtual-machines/availability-set-overview) rather than availability zones: for each application, an availability set is created and all units of that application are placed within it. This protects against hardware and infrastructure failures within a datacenter, but does not map to Juju's zone abstraction.
+
+If `use-availability-zones` is `true`, Juju instead places each machine in an availability zone of the region, spreading the units of an application across zones, and machines do not join an availability set. The zones of a region are those in which the subscription's VM sizes are offered; only VM sizes offered in the chosen zone are considered. Charms can query their zone with `JUJU_AVAILABILITY_ZONE`. If the region has no availability zones, Juju falls back to availability sets.
 ```
 
 **Storage**
@@ -232,6 +240,7 @@ The `zones` constraint is not supported on Azure. Instead, Juju uses [Azure avai
 Microsoft Azure supports the following {ref}`placement directives <placement-directive>`:
 
 - {ref}`placement-directive-subnet`
+- {ref}`placement-directive-zone`. Requires the {ref}`use-availability-zones <azure-model-use-availability-zones>` model configuration key to be `true`.
 
 (azure-machine-resources-created-per-machine)=
 ### Resources created per machine
@@ -245,7 +254,7 @@ Applies to all machines, including controller machines. Controller-specific defa
 **Networking**
 
 - **Network interface**: Connected to appropriate subnet (controller or internal) with dynamically-allocated private IP address.
-- **Public IP address**: Static IPv4 address created by default. Disable via `allocate-public-ip` constraint.
+- **Public IP address**: Static IPv4 address created by default. Disable via `allocate-public-ip` constraint. Created in the machine's availability zone, if any.
 
 **Storage**
 
@@ -270,7 +279,7 @@ See also: {ref}`storage-provider-azure` for the Azure storage provider configura
 ```
 
 - **OS disk**: `StandardSSD_LRS` by default, minimum 30 GiB. Configurable via `root-disk` and `root-disk-source` constraints.
-- **Additional disks**: Created via storage constraints using the configured storage pool.
+- **Additional disks**: Created via storage constraints using the configured storage pool. Disks attached to a machine in an availability zone are created in the same zone.
 
 (azure-storage)=
 ## Storage

@@ -126,6 +126,11 @@ type azureEnviron struct {
 	config                 *azureModelConfig
 	instanceTypes          map[string]instances.InstanceType
 	commonResourcesCreated bool
+
+	// instanceTypeZones records, for each instance type name, the
+	// availability zones in which it is offered in the model's location.
+	// It is populated along with instanceTypes.
+	instanceTypeZones map[string]set.Strings
 }
 
 var _ environs.Environ = (*azureEnviron)(nil)
@@ -490,6 +495,11 @@ func (env *azureEnviron) PrecheckInstance(ctx context.ProviderCallContext, args 
 	if _, err := env.findPlacementSubnet(ctx, args.Placement); err != nil {
 		return errors.Trace(err)
 	}
+	if _, err := env.deriveAvailabilityZone(
+		ctx, args.Placement, args.VolumeAttachments,
+	); err != nil {
+		return errors.Trace(err)
+	}
 	if !args.Constraints.HasInstanceType() {
 		return nil
 	}
@@ -527,11 +537,37 @@ func (env *azureEnviron) StartInstance(ctx context.ProviderCallContext, args env
 		env.mu.Unlock()
 		return nil, errors.Trace(err)
 	}
+
+	// Only provision into an availability zone if the model is
+	// configured to do so. The provisioner may still hold zones from a
+	// time when the option was enabled.
+	availabilityZone := args.AvailabilityZone
+	if availabilityZone != "" && !env.config.useAvailabilityZones {
+		logger.Debugf(
+			"ignoring availability zone %q: %s is not enabled",
+			availabilityZone, configAttrUseAvailabilityZones,
+		)
+		availabilityZone = ""
+	}
 	instanceTypes := make(map[string]instances.InstanceType)
 	for k, v := range envInstanceTypes {
+		if availabilityZone != "" &&
+			!env.instanceTypeZones[v.Name].Contains(availabilityZone) {
+			continue
+		}
 		instanceTypes[k] = v
 	}
 	env.mu.Unlock()
+
+	if availabilityZone != "" && len(instanceTypes) == 0 {
+		// This error is zone dependent, so the provisioner
+		// will try another zone.
+		return nil, errors.Errorf(
+			"no instance types available in availability zone %q",
+			availabilityZone,
+		)
+	}
+	args.AvailabilityZone = availabilityZone
 
 	// If the user has not specified a root-disk size, then
 	// set a sensible default.
@@ -677,6 +713,9 @@ func (env *azureEnviron) startInstance(
 	if args.Constraints.HasRootDiskSource() {
 		hc.RootDiskSource = args.Constraints.RootDiskSource
 	}
+	if args.AvailabilityZone != "" {
+		hc.AvailabilityZone = &args.AvailabilityZone
+	}
 
 	return &environs.StartInstanceResult{
 		Instance: inst,
@@ -778,32 +817,42 @@ func (env *azureEnviron) createVirtualMachine(
 		}
 	}
 
+	// A virtual machine can be in an availability zone or an
+	// availability set, but not both.
+	var zones []string
+	if args.AvailabilityZone != "" {
+		zones = []string{args.AvailabilityZone}
+	}
+
 	var availabilitySetSubResource *armcompute.SubResource
-	availabilitySetName, err := availabilitySetName(
-		vmName, vmTags, instanceConfig.IsController(),
-	)
-	if err != nil {
-		return errors.Annotate(err, "getting availability set name")
+	var avSetName string
+	if len(zones) == 0 {
+		avSetName, err = availabilitySetName(
+			vmName, vmTags, instanceConfig.IsController(),
+		)
+		if err != nil {
+			return errors.Annotate(err, "getting availability set name")
+		}
 	}
 	availabilitySetId := fmt.Sprintf(
 		`[resourceId('Microsoft.Compute/availabilitySets','%s')]`,
-		availabilitySetName,
+		avSetName,
 	)
-	if availabilitySetName != "" {
+	if avSetName != "" {
 		availabilitySetSubResource = &armcompute.SubResource{
 			ID: to.Ptr(availabilitySetId),
 		}
 	}
-	if !createAvailabilitySet && availabilitySetName != "" {
+	if !createAvailabilitySet && avSetName != "" {
 		availabilitySet, err := env.availabilitySetsClient()
 		if err != nil {
 			return errors.Trace(err)
 		}
-		if _, err = availabilitySet.Get(ctx, env.resourceGroup, availabilitySetName, nil); err != nil {
-			return errors.Annotatef(err, "expecting availability set %q to be available", availabilitySetName)
+		if _, err = availabilitySet.Get(ctx, env.resourceGroup, avSetName, nil); err != nil {
+			return errors.Annotatef(err, "expecting availability set %q to be available", avSetName)
 		}
 	}
-	if createAvailabilitySet && availabilitySetName != "" {
+	if createAvailabilitySet && avSetName != "" {
 		availabilitySetProperties := &armcompute.AvailabilitySetProperties{
 			// Azure complains when the fault domain count
 			// is not specified, even though it is meant
@@ -815,7 +864,7 @@ func (env *azureEnviron) createVirtualMachine(
 		res = append(res, armtemplates.Resource{
 			APIVersion: computeAPIVersion,
 			Type:       "Microsoft.Compute/availabilitySets",
-			Name:       availabilitySetName,
+			Name:       avSetName,
 			Location:   env.location,
 			Tags:       envTags,
 			Properties: availabilitySetProperties,
@@ -858,6 +907,7 @@ func (env *azureEnviron) createVirtualMachine(
 				PublicIPAddressVersion:   to.Ptr(armnetwork.IPVersionIPv4),
 				PublicIPAllocationMethod: to.Ptr(publicIPAddressAllocationMethod),
 			},
+			Zones: zones,
 		})
 	}
 
@@ -928,6 +978,7 @@ func (env *azureEnviron) createVirtualMachine(
 			AvailabilitySet: availabilitySetSubResource,
 		},
 		DependsOn: vmDependsOn,
+		Zones:     zones,
 	}
 	// For controllers, check to see if we need to assign a managed identity resource to the vm.
 	if instanceConfig.IsController() {
@@ -2400,6 +2451,7 @@ func (env *azureEnviron) getInstanceTypesLocked(ctx context.ProviderCallContext)
 		return nil, errors.Trace(err)
 	}
 	instanceTypes := make(map[string]instances.InstanceType)
+	instanceTypeZones := make(map[string]set.Strings)
 	pager := skus.NewListPager(nil)
 	for pager.More() {
 		next, err := pager.NextPage(ctx)
@@ -2460,6 +2512,7 @@ func (env *azureEnviron) getInstanceTypesLocked(ctx context.ProviderCallContext)
 			)
 
 			instanceTypes[instanceType.Name] = instanceType
+			instanceTypeZones[instanceType.Name] = resourceSKUZones(resource, env.location)
 			// Create aliases for standard role sizes.
 			if strings.HasPrefix(instanceType.Name, "Standard_") {
 				instanceTypes[instanceType.Name[len("Standard_"):]] = instanceType
@@ -2467,7 +2520,25 @@ func (env *azureEnviron) getInstanceTypesLocked(ctx context.ProviderCallContext)
 		}
 	}
 	env.instanceTypes = instanceTypes
+	env.instanceTypeZones = instanceTypeZones
 	return instanceTypes, nil
+}
+
+// resourceSKUZones returns the availability zones in which the resource SKU
+// is offered for the given location.
+func resourceSKUZones(resource *armcompute.ResourceSKU, location string) set.Strings {
+	zones := set.NewStrings()
+	for _, info := range resource.LocationInfo {
+		if info == nil || !strings.EqualFold(toValue(info.Location), location) {
+			continue
+		}
+		for _, zone := range info.Zones {
+			if zone != nil && *zone != "" {
+				zones.Add(*zone)
+			}
+		}
+	}
+	return zones
 }
 
 // getArchFromResourceSKU returns the architecture of the instance type based on the resource SKU.

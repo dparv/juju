@@ -435,7 +435,8 @@ func (api *ProvisionerAPI) subnetsAndZonesForSpace(machineID string, spaceName s
 		zones := subnet.AvailabilityZones
 		if len(zones) == 0 {
 			// For most providers we expect availability zones, however:
-			// - Azure uses Availability Sets.
+			// - Azure subnets are regional; they span all of the
+			//   availability zones in a region.
 			// - OpenStack networks have R/W availability zone *hints*,
 			//   and AZs based on the actual scheduling of the resource.
 			// For these cases we allow empty map entries.

@@ -28,6 +28,11 @@ const (
 	// is attached to.
 	configAttrNetwork = "network"
 
+	// configAttrUseAvailabilityZones instructs the provider to place
+	// virtual machines into Azure availability zones, rather than into
+	// per-application availability sets.
+	configAttrUseAvailabilityZones = "use-availability-zones"
+
 	// The below bits are internal book-keeping things, rather than
 	// configuration. Config is just what we have to work with.
 
@@ -52,12 +57,17 @@ var configSchema = environschema.Fields{
 		Type:        environschema.Tstring,
 		Immutable:   true,
 	},
+	configAttrUseAvailabilityZones: {
+		Description: "If true, place machines into Azure availability zones instead of availability sets. Zone constraints and zone placement directives are honoured, and machines are spread across the zones of the region. Changing this value only affects machines provisioned afterwards.",
+		Type:        environschema.Tbool,
+	},
 }
 
 var configDefaults = schema.Defaults{
-	configAttrLoadBalancerSkuName: string(armnetwork.LoadBalancerSKUNameStandard),
-	configAttrResourceGroupName:   schema.Omit,
-	configAttrNetwork:             schema.Omit,
+	configAttrLoadBalancerSkuName:  string(armnetwork.LoadBalancerSKUNameStandard),
+	configAttrResourceGroupName:    schema.Omit,
+	configAttrNetwork:              schema.Omit,
+	configAttrUseAvailabilityZones: false,
 }
 
 // Schema returns the configuration schema for an environment.
@@ -96,6 +106,10 @@ type azureModelConfig struct {
 	loadBalancerSkuName string
 	resourceGroupName   string
 	virtualNetworkName  string
+
+	// useAvailabilityZones is true if machines should be placed into
+	// availability zones rather than availability sets.
+	useAvailabilityZones bool
 }
 
 // knownLoadBalancerSkuNames returns a list of valid load balancer SKU names.
@@ -210,11 +224,25 @@ Please choose a model name of no more than %d characters.`,
 
 	networkName, _ := validated[configAttrNetwork].(string)
 
+	useAvailabilityZones, _ := validated[configAttrUseAvailabilityZones].(bool)
+	if useAvailabilityZones &&
+		loadBalancerSkuName != string(armnetwork.LoadBalancerSKUNameStandard) {
+		// Zonal public IP addresses are only supported by the
+		// Standard SKU.
+		return nil, errors.NotValidf(
+			"%s=%q with %s=true, expected %q",
+			configAttrLoadBalancerSkuName, loadBalancerSkuName,
+			configAttrUseAvailabilityZones,
+			armnetwork.LoadBalancerSKUNameStandard,
+		)
+	}
+
 	azureConfig := &azureModelConfig{
-		Config:              newCfg,
-		loadBalancerSkuName: loadBalancerSkuName,
-		resourceGroupName:   userSpecifiedResourceGroup,
-		virtualNetworkName:  networkName,
+		Config:               newCfg,
+		loadBalancerSkuName:  loadBalancerSkuName,
+		resourceGroupName:    userSpecifiedResourceGroup,
+		virtualNetworkName:   networkName,
+		useAvailabilityZones: useAvailabilityZones,
 	}
 	return azureConfig, nil
 }

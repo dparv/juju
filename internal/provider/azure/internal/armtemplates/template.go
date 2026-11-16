@@ -67,5 +67,6 @@ type Resource struct {
 	Resources  []Resource                         `json:"resources,omitempty"`
 
 	// Non-uniform attributes.
-	Sku *Sku `json:"sku,omitempty"`
+	Sku   *Sku     `json:"sku,omitempty"`
+	Zones []string `json:"zones,omitempty"`
 }

@@ -103,6 +103,30 @@ func (s *configSuite) TestValidateVirtualNetworkNameCantChange(c *gc.C) {
 	c.Assert(err, gc.ErrorMatches, `cannot change immutable "network" config \(foo -> bar\)`)
 }
 
+func (s *configSuite) TestValidateUseAvailabilityZones(c *gc.C) {
+	s.assertConfigValid(c, testing.Attrs{"use-availability-zones": true})
+}
+
+func (s *configSuite) TestValidateUseAvailabilityZonesBasicSku(c *gc.C) {
+	s.assertConfigInvalid(
+		c, testing.Attrs{
+			"use-availability-zones": true,
+			"load-balancer-sku-name": "Basic",
+		},
+		`load-balancer-sku-name="Basic" with use-availability-zones=true, expected "Standard" not valid`,
+	)
+}
+
+func (s *configSuite) TestValidateUseAvailabilityZonesCanChange(c *gc.C) {
+	cfgOld := makeTestModelConfig(c)
+	cfgNew := makeTestModelConfig(c, testing.Attrs{"use-availability-zones": true})
+	_, err := s.provider.Validate(cfgNew, cfgOld)
+	c.Assert(err, jc.ErrorIsNil)
+
+	_, err = s.provider.Validate(cfgOld, cfgNew)
+	c.Assert(err, jc.ErrorIsNil)
+}
+
 func (s *configSuite) assertConfigValid(c *gc.C, attrs testing.Attrs) {
 	cfg := makeTestModelConfig(c, attrs)
 	_, err := s.provider.Validate(cfg, nil)
