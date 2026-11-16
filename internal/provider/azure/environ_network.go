@@ -6,9 +6,11 @@ package azure
 import (
 	"fmt"
 	"math/rand"
+	"sort"
 	"strings"
 
 	azurenetwork "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork"
+	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 
 	"github.com/juju/juju/core/instance"
@@ -460,13 +462,20 @@ func (env *azureEnviron) subnetsForZone(subnetsToZones []map[network.Id][]string
 	for i, nic := range subnetsToZones {
 		var subnetIDs []network.Id
 		if az != "" {
-			var err error
-			if subnetIDs, err = network.FindSubnetIDsForAvailabilityZone(az, nic); err != nil {
-				return nil, errors.Annotatef(err, "getting subnets in zone %q", az)
+			// Azure subnets are regional and span all of the
+			// availability zones in a region, so a subnet without
+			// zone information is usable in any zone.
+			for subnetID, zones := range nic {
+				if len(zones) == 0 || set.NewStrings(zones...).Contains(az) {
+					subnetIDs = append(subnetIDs, subnetID)
+				}
 			}
 			if len(subnetIDs) == 0 {
 				return nil, errors.Errorf("availability zone %q has no subnets satisfying space constraints", az)
 			}
+			sort.Slice(subnetIDs, func(i, j int) bool {
+				return subnetIDs[i] < subnetIDs[j]
+			})
 		} else {
 			for subnetID := range nic {
 				subnetIDs = append(subnetIDs, subnetID)
@@ -479,27 +488,46 @@ func (env *azureEnviron) subnetsForZone(subnetsToZones []map[network.Id][]string
 	return subnetIDsForZone, nil
 }
 
-func (env *azureEnviron) parsePlacement(placement string) (string, error) {
+// azurePlacement holds the result of parsing a placement directive.
+type azurePlacement struct {
+	// subnet is the name of the subnet to place the machine in.
+	subnet string
+
+	// zone is the name of the availability zone to place the machine in.
+	zone string
+}
+
+func (env *azureEnviron) parsePlacement(placement string) (azurePlacement, error) {
 	pos := strings.IndexRune(placement, '=')
 	if pos == -1 {
-		return "", fmt.Errorf("unknown placement directive: %v", placement)
+		return azurePlacement{}, fmt.Errorf("unknown placement directive: %v", placement)
 	}
 	switch key, value := placement[:pos], placement[pos+1:]; key {
 	case "subnet":
-		return value, nil
+		return azurePlacement{subnet: value}, nil
+	case "zone":
+		if !env.useAvailabilityZones() {
+			return azurePlacement{}, errors.NotSupportedf(
+				"zone placement without %s=true", configAttrUseAvailabilityZones,
+			)
+		}
+		return azurePlacement{zone: value}, nil
 	}
-	return "", fmt.Errorf("unknown placement directive: %v", placement)
+	return azurePlacement{}, fmt.Errorf("unknown placement directive: %v", placement)
 }
 
 func (env *azureEnviron) findPlacementSubnet(ctx context.ProviderCallContext, placement string) (network.Id, error) {
 	if placement == "" {
 		return "", nil
 	}
-	subnetName, err := env.parsePlacement(placement)
+	p, err := env.parsePlacement(placement)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
+	if p.subnet == "" {
+		return "", nil
+	}
 
-	logger.Debugf("searching for subnet matching placement directive %q", subnetName)
-	return env.findSubnetID(ctx, subnetName)
+	logger.Debugf("searching for subnet matching placement directive %q", p.subnet)
+	return env.findSubnetID(ctx, p.subnet)
 }

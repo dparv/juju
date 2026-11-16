@@ -36,7 +36,7 @@
 //
 // # Resiliency
 //
-// Unlike most other providers, the Azure provider does not currently support availability zones.
+// By default, the Azure provider does not use availability zones.
 // Instead, for each application, the provider creates an [Azure availability set] named after the application.
 //
 // When a machine is created to host a unit of the application, the machine will join that availability set.
@@ -48,8 +48,12 @@
 // Thus, they are designed to protect against failures within that region but do not provide protection
 // against a regional outage.
 //
-// Availability sets are similar to "availability zones", but dissimilar enough that they do not fit into
-// Juju's abstraction of zones. In particular, charms cannot query what "zone" they are in on Azure.
+// If the "use-availability-zones" model config is true, the provider implements Juju's availability zone
+// abstraction using [Azure availability zones] instead. The zones of a region are those in which the
+// subscription's virtual machine sizes are offered. Machines are created in a single zone and do not join
+// an availability set, as Azure does not allow both. A machine's public IP address and data disks are
+// created in the same zone as the machine. Azure subnets span all zones in a region, so subnets are not
+// filtered by zone. If the region has no zones, the provider falls back to availability sets.
 //
 // # Instances
 //
@@ -87,6 +91,7 @@
 //
 // [Azure SDK]: https://github.com/Azure/azure-sdk-for-go
 // [Azure resource manager]: https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/overview
+// [Azure availability zones]: https://learn.microsoft.com/en-us/azure/reliability/availability-zones-overview
 // [Azure availability set]: https://learn.microsoft.com/en-us/azure/virtual-machines/availability-set-overview
 // [Azure disk encryption set]: https://learn.microsoft.com/en-us/azure/virtual-machines/disk-encryption
 // [Azure key vault]: https://learn.microsoft.com/en-us/azure/key-vault/general/overview
